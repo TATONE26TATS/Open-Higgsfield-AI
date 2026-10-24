@@ -112,6 +112,8 @@ function mediaExtension(dataUrl) {
     'video/webm': 'webm',
     'audio/mpeg': 'mp3',
     'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+    'audio/mp4': 'm4a',
   })[mime] || 'bin'
 }
 
