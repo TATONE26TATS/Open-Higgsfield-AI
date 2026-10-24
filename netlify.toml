@@ -8,7 +8,7 @@
   NODE_VERSION = "22"
 
 [functions]
-  included_files = ["data/models.json"]
+  included_files = ["data/models.json", "data/director-system.md"]
 
 # Same-origin streaming route for media downloads.
 [[edge_functions]]

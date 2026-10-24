@@ -29,9 +29,9 @@ export function Header(navigate) {
 
     const menu = document.createElement('nav');
     menu.className = 'hidden lg:flex items-center gap-6 text-[13px] font-bold text-secondary';
-    const items = ['Library', 'Image', 'Video', 'Lip Sync', 'Cinema Studio'];
+    const items = ['Library', 'Director', 'Image', 'Video', 'Lip Sync', 'Cinema Studio'];
 
-    const pageForItem = { 'Library': 'library', 'Image': 'image', 'Video': 'video', 'Lip Sync': 'lipsync', 'Cinema Studio': 'cinema' };
+    const pageForItem = { 'Library': 'library', 'Director': 'director', 'Image': 'image', 'Video': 'video', 'Lip Sync': 'lipsync', 'Cinema Studio': 'cinema' };
     const links = {};
 
     const activate = (name) => {
