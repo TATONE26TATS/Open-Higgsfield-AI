@@ -161,6 +161,8 @@ export function normalizePackage(pkg) {
             dialogue: asText(s.dialogue),
             keyframe_url: asText(s.keyframe_url),
             video_url: asText(s.video_url),
+            // Extra clips appended by Extend, each continuing from the previous one's last frame.
+            extensions: asArray(s.extensions).map(asText).filter(Boolean),
         };
     });
     const format = pkg.format || {};
@@ -195,6 +197,10 @@ export function normalizePackage(pkg) {
         })),
         shots,
         audio: {
+            voice: {
+                name: asText(pkg.audio?.voice?.name) || 'Charon',
+                direction: asText(pkg.audio?.voice?.direction),
+            },
             voiceover: asArray(pkg.audio?.voiceover).map(v => ({ shot: asText(v.shot), text: asText(v.text), timing: asText(v.timing) })),
             music: asArray(pkg.audio?.music).map(m => ({ t: asText(m.t), cue: asText(m.cue) })),
             sound_design: asArray(pkg.audio?.sound_design).map(asText),
@@ -287,7 +293,7 @@ export function packageToMarkdown(pkg) {
     out.push('## 6. Multi-Image Reference Strategy', '');
     pkg.characters.forEach(c => out.push(`- **${c.name}**: generate the character sheet first (\`${KEYFRAME_MODEL}\`), then attach it as reference #1 to every shot that lists ${c.id}.`, `  - Sheet prompt: ${characterSheetPrompt(c)}`));
     out.push('', 'Reference order per shot follows the order of the shot\'s character list.', '');
-    out.push('## 7. Audio & Lip-Sync Direction', '');
+    out.push('## 7. Audio & Lip-Sync Direction', '', `Voice: ${pkg.audio.voice.name}${pkg.audio.voice.direction ? ` (${pkg.audio.voice.direction})` : ''}`, '');
     table(['Shot', 'Voice-over', 'Timing'], pkg.audio.voiceover.map(v => [v.shot, v.text, v.timing]));
     table(['Time', 'Music cue'], pkg.audio.music.map(m => [m.t, m.cue]));
     pkg.audio.sound_design.forEach(s => out.push(`- ${s}`));
@@ -302,4 +308,15 @@ export function packageToMarkdown(pkg) {
     pkg.execution_notes.forEach((n, i) => out.push(`${i + 1}. ${n}`));
     out.push('');
     return out.join('\n');
+}
+
+// Clips of a shot in timeline order: the main clip plus any extensions.
+export function shotClips(shot) {
+    return [shot.video_url, ...shot.extensions].filter(Boolean);
+}
+
+// Seconds of footage still missing after the generated clips of an extend shot.
+export function extendRemaining(shot) {
+    const per = snapDuration(shot.duration_s, shot.model);
+    return Math.max(0, shot.duration_s - per * shotClips(shot).length);
 }

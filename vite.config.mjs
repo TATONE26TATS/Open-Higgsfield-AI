@@ -6,6 +6,10 @@ export default defineConfig({
     plugins: [
         tailwindcss(),
     ],
+    // ffmpeg.wasm spawns its own worker; pre-bundling breaks the worker URL.
+    optimizeDeps: {
+        exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util'],
+    },
     server: {
         proxy: {
             '/api': {

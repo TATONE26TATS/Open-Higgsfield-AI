@@ -7,13 +7,18 @@ import {
     buildBrief, requestPackage, normalizePackage, snapDuration,
     shotReferences, keyframePrompt, motionPrompt, characterSheetPrompt,
     loadProjects, saveProject, deleteProject, packageToMarkdown,
+    shotClips, extendRemaining,
 } from '../lib/director.js';
+import { VOICES, synthesizeSpeech, getGeminiKey, setGeminiKey } from '../lib/voice.js';
+import { fetchMedia, lastFrame, videoDuration, assembleFilm } from '../lib/assemble.js';
+import { putBlob, getBlob, deleteBlob, deleteByPrefix } from '../lib/mediaStore.js';
 
 const FOCALS = [8, 14, 24, 35, 50, 85];
 const APERTURES = ['f/1.4', 'f/4', 'f/11'];
 const PIPELINES = ['i2v', 't2v', 'i2v+extend', 'lipsync'];
 const ASPECTS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 const DURATIONS = [15, 30, 60, 90, 120];
+const MAX_EXTENSIONS = 4;
 
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
 const options = (list, selected, label = (v) => v) => list.map(v => `<option value="${esc(v)}" ${String(v) === String(selected) ? 'selected' : ''}>${esc(label(v))}</option>`).join('');
@@ -37,13 +42,51 @@ export function DirectorStudio() {
     const container = document.createElement('div');
     container.className = 'w-full h-full overflow-y-auto bg-app-bg text-white';
 
-    let project = null;            // { id, brief, pkg }
+    let project = null;            // { id, brief, pkg, edit: { musicName, musicVolume, filmAt } }
+    const media = {};              // IndexedDB blob key → object URL, for players
+    let assembleStatus = null;     // { stage, ratio } while the film is being assembled
     const busy = new Set();        // keys like 'kf:3', 'vid:3', 'sheet:c1', 'package'
     const errors = {};             // same keys → message
     let batchRunning = false;
     let draft = { duration: 60, aspect: '16:9' }; // brief form values, kept across re-renders
 
     const persist = () => { if (project) saveProject(project); };
+
+    // Blob keys in IndexedDB, scoped to the project.
+    const voKey = (i) => `${project.id}:vo:${i}`;
+    const dlgKey = (shotId) => `${project.id}:dlg:${shotId}`;
+    const musicKey = () => `${project.id}:music`;
+    const filmKey = () => `${project.id}:film`;
+
+    async function setMedia(key, blob) {
+        if (media[key]) URL.revokeObjectURL(media[key]);
+        if (blob) { await putBlob(key, blob); media[key] = URL.createObjectURL(blob); }
+        else { await deleteBlob(key); delete media[key]; }
+    }
+
+    // Loads the stored audio/film blobs of the open project into object URLs.
+    async function loadMedia() {
+        Object.keys(media).forEach(k => { URL.revokeObjectURL(media[k]); delete media[k]; });
+        if (!project) return;
+        project.edit = { musicName: '', musicVolume: 0.25, filmAt: 0, ...(project.edit || {}) };
+        const keys = [
+            ...project.pkg.audio.voiceover.map((_, i) => voKey(i)),
+            ...project.pkg.shots.filter(s => s.dialogue).map(s => dlgKey(s.id)),
+            musicKey(), filmKey(),
+        ];
+        for (const key of keys) {
+            const blob = await getBlob(key).catch(() => null);
+            if (blob) media[key] = URL.createObjectURL(blob);
+        }
+        render();
+    }
+
+    function openProject(next) {
+        project = next;
+        if (project) project.pkg = normalizePackage(project.pkg);
+        render();
+        loadMedia();
+    }
 
     // ── Rendering ──────────────────────────────────────────────────────────
     function render() {
@@ -172,6 +215,8 @@ export function DirectorStudio() {
                 </div>
             </section>
 
+            ${audioSection()}
+
             ${pkg.execution_notes.length ? `
             <section class="bg-[#141414] border border-white/5 rounded-3xl p-5">
                 <h2 class="text-lg font-black mb-3">Execution notes</h2>
@@ -229,7 +274,8 @@ export function DirectorStudio() {
                     <span class="text-[10px] font-bold bg-black/70 rounded px-1.5 py-0.5">${esc(s.scene)}</span>
                     <span class="text-[10px] font-bold bg-primary/80 text-black rounded px-1.5 py-0.5">${esc(s.pipeline)}</span>
                 </div>
-                ${busy.has(vidKey) ? '<div class="absolute inset-0 bg-black/60 flex items-center justify-center text-xs font-bold animate-pulse">Animating…</div>' : ''}
+                ${s.extensions.length ? `<span class="absolute top-2 right-2 text-[10px] font-black bg-black/70 rounded px-1.5 py-0.5">+${s.extensions.length} ext</span>` : ''}
+                ${busy.has(vidKey) ? `<div class="absolute inset-0 bg-black/60 flex items-center justify-center text-xs font-bold animate-pulse">${esc(progressNote[vidKey] || 'Animating…')}</div>` : ''}
             </div>
             <div class="p-4 flex flex-col gap-3">
                 <div class="text-sm font-bold">${esc(s.shot_type)} <span class="text-muted font-normal">· ${esc(s.movement)}</span></div>
@@ -259,11 +305,81 @@ export function DirectorStudio() {
                 ${errors[vidKey] ? `<div class="text-xs text-red-400">${esc(errors[vidKey])}</div>` : ''}
                 <div class="flex gap-2">
                     <button data-action="gen-keyframe" data-shot="${esc(s.id)}" ${busy.has(kfKey) || s.pipeline === 't2v' ? 'disabled' : ''} class="flex-1 border border-white/10 text-xs font-bold px-3 py-2 rounded-xl hover:bg-white/5 disabled:opacity-40">${s.keyframe_url ? 'Redo keyframe' : 'Keyframe'}</button>
-                    <button data-action="gen-video" data-shot="${esc(s.id)}" ${busy.has(vidKey) || (s.pipeline !== 't2v' && !s.keyframe_url) ? 'disabled' : ''} class="flex-1 bg-white text-black text-xs font-black px-3 py-2 rounded-xl disabled:opacity-40">${s.video_url ? 'Redo clip' : 'Animate'}</button>
+                    <button data-action="gen-video" data-shot="${esc(s.id)}" ${busy.has(vidKey) || (s.pipeline !== 't2v' && !s.keyframe_url) ? 'disabled' : ''} class="flex-1 bg-white text-black text-xs font-black px-3 py-2 rounded-xl disabled:opacity-40">${s.pipeline === 'lipsync' && s.dialogue ? (s.video_url ? 'Redo lip-sync' : 'Lip-sync') : (s.video_url ? 'Redo clip' : 'Animate')}</button>
+                    ${s.video_url ? `<button data-action="extend" data-shot="${esc(s.id)}" ${busy.has(vidKey) || s.extensions.length >= MAX_EXTENSIONS ? 'disabled' : ''} title="Continue this shot from its last frame" class="border border-white/10 text-xs font-bold px-3 py-2 rounded-xl hover:bg-white/5 disabled:opacity-40">+ Extend</button>` : ''}
                     ${s.video_url ? `<a href="${esc(s.video_url)}" target="_blank" rel="noopener" download class="border border-white/10 text-xs font-bold px-3 py-2 rounded-xl hover:bg-white/5">↓</a>` : ''}
                 </div>
             </div>
         </div>`;
+    }
+
+    function audioSection() {
+        const pkg = project.pkg;
+        const edit = project.edit || { musicVolume: 0.25 };
+        const key = getGeminiKey();
+        const lines = pkg.audio.voiceover;
+        const dialogueShots = pkg.shots.filter(s => s.pipeline === 'lipsync' && s.dialogue);
+        const missingVoices = lines.filter((_, i) => !media[voKey(i)]).length;
+        const readyShots = pkg.shots.filter(s => s.video_url).length;
+        const player = (k) => media[k] ? `<audio src="${media[k]}" controls class="h-8 w-full md:w-56"></audio>` : '<span class="text-xs text-muted">no audio yet</span>';
+        return `
+        <section class="grid lg:grid-cols-2 gap-4">
+            <div class="bg-[#141414] border border-white/5 rounded-3xl p-5 flex flex-col gap-4">
+                <div class="flex items-baseline justify-between gap-3">
+                    <h2 class="text-lg font-black">Voice</h2>
+                    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="text-xs text-muted hover:text-white">Free Gemini key →</a>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <input data-action="gemini-key" type="password" value="${key ? '••••••••' : ''}" placeholder="Gemini API key" class="bg-black/40 border border-white/5 rounded-xl px-3 py-2 text-xs text-white placeholder:text-muted">
+                    <select data-action="voice-name" class="bg-black/40 border border-white/5 rounded-xl px-3 py-2 text-xs text-white">${options(Object.keys(VOICES), pkg.audio.voice.name, v => VOICES[v])}</select>
+                    <input data-action="voice-direction" value="${esc(pkg.audio.voice.direction)}" placeholder="Delivery, e.g. calm, low" class="bg-black/40 border border-white/5 rounded-xl px-3 py-2 text-xs text-white placeholder:text-muted">
+                </div>
+                ${errors.voices ? `<div class="text-xs text-red-400">${esc(errors.voices)}</div>` : ''}
+                <div class="flex flex-col gap-2 max-h-80 overflow-y-auto">
+                    ${lines.map((l, i) => `
+                    <div class="flex flex-col md:flex-row md:items-center gap-2 border-b border-white/5 pb-2">
+                        <div class="flex-1 text-sm"><span class="font-mono text-primary text-xs">#${esc(l.shot)}</span> ${esc(l.text)}</div>
+                        ${player(voKey(i))}
+                        <button data-action="gen-voice" data-index="${i}" ${busy.has(`vo:${i}`) ? 'disabled' : ''} class="text-xs font-bold text-secondary hover:text-white disabled:opacity-40">${busy.has(`vo:${i}`) ? '…' : (media[voKey(i)] ? 'Redo' : 'Generate')}</button>
+                        <label class="text-xs font-bold text-secondary hover:text-white cursor-pointer">Upload<input type="file" accept="audio/*" data-action="upload-voice" data-index="${i}" class="hidden"></label>
+                    </div>`).join('') || '<div class="text-sm text-muted">No voice-over in this package.</div>'}
+                    ${dialogueShots.map(s => `
+                    <div class="flex flex-col md:flex-row md:items-center gap-2 border-b border-white/5 pb-2">
+                        <div class="flex-1 text-sm"><span class="font-mono text-primary text-xs">#${esc(s.id)} lip-sync</span> “${esc(s.dialogue)}”</div>
+                        ${player(dlgKey(s.id))}
+                        <label class="text-xs font-bold text-secondary hover:text-white cursor-pointer">Upload<input type="file" accept="audio/*" data-action="upload-dialogue" data-shot="${esc(s.id)}" class="hidden"></label>
+                    </div>`).join('')}
+                </div>
+                <button data-action="gen-voices" ${!missingVoices || busy.has('voices') ? 'disabled' : ''} class="self-start bg-white text-black font-black text-sm px-4 py-2.5 rounded-xl disabled:opacity-40">${busy.has('voices') ? 'Generating voices…' : `Generate ${missingVoices} voice line${missingVoices === 1 ? '' : 's'}`}</button>
+            </div>
+
+            <div class="bg-[#141414] border border-white/5 rounded-3xl p-5 flex flex-col gap-4">
+                <h2 class="text-lg font-black">Music & final edit</h2>
+                <div class="flex flex-col gap-2">
+                    <div class="flex flex-wrap items-center gap-3">
+                        <label class="border border-white/10 text-xs font-bold px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer">${media[musicKey()] ? 'Replace music' : 'Add music'}<input type="file" accept="audio/*" data-action="upload-music" class="hidden"></label>
+                        ${media[musicKey()] ? `<span class="text-xs text-secondary truncate max-w-[12rem]">${esc(edit.musicName)}</span><button data-action="remove-music" class="text-xs text-muted hover:text-red-400 font-bold">Remove</button>` : '<span class="text-xs text-muted">Royalty-free track, e.g. from Pixabay Music or the YouTube Audio Library</span>'}
+                    </div>
+                    ${media[musicKey()] ? `
+                    <label class="flex items-center gap-3 text-xs text-secondary">Music level
+                        <input data-action="music-volume" type="range" min="0.05" max="1" step="0.05" value="${esc(edit.musicVolume)}" class="flex-1 accent-[#ff2d2d]">
+                        <span>${Math.round(edit.musicVolume * 100)}%</span>
+                    </label>` : ''}
+                    ${pkg.audio.music.length ? `<div class="text-xs text-muted">Cues: ${pkg.audio.music.map(m => `${esc(m.t)} ${esc(m.cue)}`).join(' · ')}</div>` : ''}
+                </div>
+                <div class="text-xs text-muted">${readyShots}/${pkg.shots.length} shots have clips. Shots without a clip are skipped; voice lines are placed at the start of their shot.</div>
+                ${errors.assemble ? `<div class="text-xs text-red-400">${esc(errors.assemble)}</div>` : ''}
+                ${assembleStatus ? `
+                <div class="flex flex-col gap-1">
+                    <div class="text-xs font-bold">${esc(assembleStatus.stage)}</div>
+                    <div class="h-2 bg-black/40 rounded-full overflow-hidden"><div data-assemble-bar class="h-full bg-primary transition-all" style="width:${Math.round(assembleStatus.ratio * 100)}%"></div></div>
+                </div>` : ''}
+                <button data-action="assemble" ${!readyShots || assembleStatus ? 'disabled' : ''} class="self-start bg-primary text-black font-black text-sm px-4 py-2.5 rounded-xl disabled:opacity-40">${media[filmKey()] ? 'Re-assemble film' : 'Assemble film'}</button>
+                ${media[filmKey()] ? `
+                <video src="${media[filmKey()]}" controls playsinline class="w-full rounded-2xl bg-black" style="aspect-ratio:${esc(pkg.format.aspect_ratio.replace(':', '/'))}"></video>
+                <a href="${media[filmKey()]}" download="${esc(slug(pkg.title))}.mp4" class="self-start border border-white/10 text-sm font-bold px-4 py-2.5 rounded-xl hover:bg-white/5">Download MP4</a>` : ''}
+            </div>
+        </section>`;
     }
 
     // ── Actions ────────────────────────────────────────────────────────────
@@ -303,6 +419,7 @@ export function DirectorStudio() {
             if (!pkg.shots.length) throw new Error('The package came back without shots. Try again or add more detail.');
             project = { id: `dir_${Date.now()}`, brief: data, pkg };
         });
+        if (project) loadMedia();
     }
 
     function generateKeyframe(shotId) {
@@ -319,27 +436,173 @@ export function DirectorStudio() {
             if (!res?.url) throw new Error('No image returned.');
             shot.keyframe_url = res.url;
             shot.video_url = '';
+            shot.extensions = [];
         });
+    }
+
+    const progressNote = {};       // busy key → short status shown on the card
+
+    function videoParams(shot) {
+        const model = DIRECTOR_VIDEO_MODELS[shot.model] || DIRECTOR_VIDEO_MODELS['seedance-2.0'];
+        return {
+            model: model.id,
+            prompt: motionPrompt(project.pkg, shot),
+            aspect_ratio: project.pkg.format.aspect_ratio,
+            duration: snapDuration(shot.duration_s, shot.model),
+        };
+    }
+
+    async function dialogueAudio(shot) {
+        let blob = await getBlob(dlgKey(shot.id)).catch(() => null);
+        if (!blob) {
+            blob = await synthesizeSpeech(shot.dialogue, { voice: project.pkg.audio.voice.name, direction: project.pkg.audio.voice.direction });
+            await setMedia(dlgKey(shot.id), blob);
+        }
+        return blob;
+    }
+
+    // Grabs the last frame of the shot's latest clip and animates it again.
+    async function appendExtension(shot, key) {
+        const clips = shotClips(shot);
+        progressNote[key] = `Extending (${clips.length + 1})…`;
+        render();
+        const frame = await lastFrame(await fetchMedia(clips[clips.length - 1]));
+        const frameUrl = await kie.uploadFile(new File([frame], `shot-${shot.id}-frame-${clips.length}.jpg`, { type: 'image/jpeg' }));
+        const params = videoParams(shot);
+        const res = await kie.generateI2V({
+            ...params,
+            prompt: `Continue the same continuous shot seamlessly from this exact frame, no cut, same lighting and camera direction. ${params.prompt}`,
+            image_url: frameUrl,
+        });
+        if (!res?.url) throw new Error('No video returned for the extension.');
+        shot.extensions.push(res.url);
+        persist();
     }
 
     function generateClip(shotId) {
         const shot = findShot(shotId);
         if (!shot || !withCredentials(() => generateClip(shotId))) return Promise.resolve();
-        return run(`vid:${shotId}`, async () => {
-            const pkg = project.pkg;
-            const model = DIRECTOR_VIDEO_MODELS[shot.model] || DIRECTOR_VIDEO_MODELS['seedance-2.0'];
-            const params = {
-                model: model.id,
-                prompt: motionPrompt(pkg, shot),
-                aspect_ratio: pkg.format.aspect_ratio,
-                duration: snapDuration(shot.duration_s, shot.model),
-            };
+        const key = `vid:${shotId}`;
+        return run(key, async () => {
+            shot.extensions = [];
+            if (shot.pipeline === 'lipsync' && shot.dialogue && shot.keyframe_url) {
+                progressNote[key] = 'Voicing the line…';
+                render();
+                const audio = await dialogueAudio(shot);
+                const audioUrl = await kie.uploadFile(new File([audio], `dialogue-${shot.id}.wav`, { type: audio.type || 'audio/wav' }));
+                progressNote[key] = 'Lip-syncing…';
+                render();
+                const res = await kie.processLipSync({ image_url: shot.keyframe_url, audio_url: audioUrl, prompt: shot.motion_prompt });
+                if (!res?.url) throw new Error('No lip-sync video returned.');
+                shot.video_url = res.url;
+                return;
+            }
+            progressNote[key] = 'Animating…';
+            render();
+            const params = videoParams(shot);
             const res = shot.pipeline === 't2v' || !shot.keyframe_url
                 ? await kie.generateVideo(params)
                 : await kie.generateI2V({ ...params, image_url: shot.keyframe_url });
             if (!res?.url) throw new Error('No video returned.');
             shot.video_url = res.url;
+            persist();
+            if (shot.pipeline === 'i2v+extend') {
+                while (extendRemaining(shot) > 0 && shot.extensions.length < MAX_EXTENSIONS) {
+                    await appendExtension(shot, key);
+                }
+            }
+        }).finally(() => { delete progressNote[key]; });
+    }
+
+    function extendShot(shotId) {
+        const shot = findShot(shotId);
+        if (!shot?.video_url || !withCredentials(() => extendShot(shotId))) return;
+        const key = `vid:${shotId}`;
+        run(key, () => appendExtension(shot, key)).finally(() => { delete progressNote[key]; render(); });
+    }
+
+    async function generateVoice(i) {
+        const line = project.pkg.audio.voiceover[i];
+        if (!line) return;
+        const { name, direction } = project.pkg.audio.voice;
+        delete errors.voices;
+        await run(`vo:${i}`, async () => {
+            await setMedia(voKey(i), await synthesizeSpeech(line.text, { voice: name, direction }));
         });
+        if (errors[`vo:${i}`]) errors.voices = errors[`vo:${i}`];
+    }
+
+    async function generateAllVoices() {
+        if (!getGeminiKey()) { errors.voices = 'Add your free Gemini API key first.'; render(); return; }
+        delete errors.voices;
+        busy.add('voices');
+        render();
+        for (let i = 0; i < project.pkg.audio.voiceover.length; i++) {
+            if (media[voKey(i)]) continue;
+            await generateVoice(i);
+            if (errors.voices) break;
+        }
+        busy.delete('voices');
+        render();
+    }
+
+    async function assemble() {
+        const pkg = project.pkg;
+        delete errors.assemble;
+        assembleStatus = { stage: 'Downloading clips…', ratio: 0 };
+        render();
+        try {
+            const segments = [];
+            const shotStart = {};
+            let t = 0;
+            const shots = pkg.shots.filter(s => s.video_url);
+            for (let i = 0; i < shots.length; i++) {
+                const shot = shots[i];
+                shotStart[shot.id] = t;
+                for (const url of shotClips(shot)) {
+                    assembleStatus = { stage: `Downloading clip ${segments.length + 1}…`, ratio: 0 };
+                    render();
+                    const blob = await fetchMedia(url);
+                    const duration = await videoDuration(blob) || snapDuration(shot.duration_s, shot.model);
+                    segments.push({ blob, duration, keepAudio: shot.pipeline === 'lipsync' });
+                    t += duration;
+                }
+            }
+            const voice = [];
+            for (let i = 0; i < pkg.audio.voiceover.length; i++) {
+                const start = shotStart[pkg.audio.voiceover[i].shot];
+                const blob = await getBlob(voKey(i)).catch(() => null);
+                if (blob && start !== undefined) voice.push({ blob, start: start + 0.3 });
+            }
+            const musicBlob = await getBlob(musicKey()).catch(() => null);
+            const film = await assembleFilm({
+                segments,
+                voice,
+                music: musicBlob ? { blob: musicBlob, volume: project.edit.musicVolume } : null,
+                aspect: pkg.format.aspect_ratio,
+                onProgress: (stage, ratio) => {
+                    assembleStatus = { stage: stage || assembleStatus.stage, ratio };
+                    const bar = container.querySelector('[data-assemble-bar]');
+                    if (stage) render();
+                    else if (bar) bar.style.width = `${Math.round(ratio * 100)}%`;
+                },
+            });
+            await setMedia(filmKey(), film);
+            project.edit.filmAt = Date.now();
+            persist();
+        } catch (error) {
+            console.error('[Director] assemble', error);
+            errors.assemble = error.message || String(error);
+        } finally {
+            assembleStatus = null;
+            render();
+        }
+    }
+
+    async function storeUpload(key, file) {
+        if (!file) return;
+        await setMedia(key, file);
+        render();
     }
 
     function generateSheet(charId) {
@@ -391,9 +654,10 @@ export function DirectorStudio() {
             try {
                 const data = JSON.parse(reader.result);
                 const pkg = normalizePackage(data.pkg || data);
-                project = { id: data.id || `dir_${Date.now()}`, brief: data.brief || {}, pkg };
+                project = { id: data.id || `dir_${Date.now()}`, brief: data.brief || {}, pkg, edit: data.edit };
                 persist();
                 render();
+                loadMedia();
             } catch (error) {
                 alert(`Invalid package file: ${error.message}`);
             }
@@ -414,8 +678,13 @@ export function DirectorStudio() {
         if (!el || el.disabled || el.type === 'file') return;
         const { action, shot, char, id, index } = el.dataset;
         if (action === 'back') { project = null; render(); }
-        else if (action === 'open-project') { project = loadProjects().find(p => p.id === id) || null; if (project) project.pkg = normalizePackage(project.pkg); render(); }
-        else if (action === 'delete-project') { if (confirm('Delete this project?')) { deleteProject(id); render(); } }
+        else if (action === 'open-project') openProject(loadProjects().find(p => p.id === id) || null);
+        else if (action === 'delete-project') { if (confirm('Delete this project?')) { deleteProject(id); deleteByPrefix(`${id}:`).catch(() => {}); render(); } }
+        else if (action === 'extend') extendShot(shot);
+        else if (action === 'gen-voice') generateVoice(Number(index)).then(render);
+        else if (action === 'gen-voices') generateAllVoices();
+        else if (action === 'remove-music') { project.edit.musicName = ''; persist(); setMedia(musicKey(), null).then(render); }
+        else if (action === 'assemble') assemble();
         else if (action === 'gen-keyframe') generateKeyframe(shot);
         else if (action === 'gen-video') generateClip(shot);
         else if (action === 'gen-sheet') generateSheet(char);
@@ -430,6 +699,13 @@ export function DirectorStudio() {
         const el = e.target;
         if (el.dataset.action === 'import' && el.files?.[0]) importJson(el.files[0]);
         else if (el.dataset.action === 'upload-ref') uploadReferences(el.dataset.char, Array.from(el.files || []));
+        else if (el.dataset.action === 'upload-voice') storeUpload(voKey(Number(el.dataset.index)), el.files?.[0]);
+        else if (el.dataset.action === 'upload-dialogue') storeUpload(dlgKey(el.dataset.shot), el.files?.[0]);
+        else if (el.dataset.action === 'upload-music' && el.files?.[0]) { project.edit.musicName = el.files[0].name; persist(); storeUpload(musicKey(), el.files[0]); }
+        else if (el.dataset.action === 'gemini-key') { if (!el.value.includes('•')) setGeminiKey(el.value); render(); }
+        else if (el.dataset.action === 'voice-name') { project.pkg.audio.voice.name = el.value; persist(); }
+        else if (el.dataset.action === 'voice-direction') { project.pkg.audio.voice.direction = el.value; persist(); }
+        else if (el.dataset.action === 'music-volume') { project.edit.musicVolume = Number(el.value); persist(); render(); }
         else if (el.dataset.field && el.dataset.shot && el.tagName === 'SELECT') {
             const shot = findShot(el.dataset.shot);
             shot[el.dataset.field] = el.dataset.field === 'focal' ? Number(el.value) : el.value;
