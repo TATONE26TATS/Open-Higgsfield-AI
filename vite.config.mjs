@@ -13,6 +13,11 @@ export default defineConfig({
                 changeOrigin: true,
                 secure: false
             },
+            '/gpt-5-2': {
+                target: 'https://api.kie.ai',
+                changeOrigin: true,
+                secure: false
+            },
             '/.netlify/functions': {
                 target: 'https://higgsfield-matu.netlify.app',
                 changeOrigin: true,
