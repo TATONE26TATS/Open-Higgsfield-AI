@@ -1,4 +1,4 @@
-// Auto-generated from models_dump.json
+// Model catalogue (originally generated from the upstream models_dump.json, now edited by hand).
 export const t2iModels = [
   {
     "id": "nano-banana",
