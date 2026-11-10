@@ -6,49 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
-    "electron:build": "vite build && electron-builder --mac",
-    "electron:build:win": "vite build && electron-builder --win",
-    "electron:build:all": "vite build && electron-builder --mac --win"
-  },
-  "build": {
-    "appId": "ai.higgsfield.open",
-    "productName": "Open Higgsfield AI",
-    "copyright": "Copyright © 2025",
-    "directories": {
-      "output": "release"
-    },
-    "afterPack": "./afterPack.js",
-    "files": [
-      "dist/**/*",
-      "electron/**/*"
-    ],
-    "mac": {
-      "category": "public.app-category.graphics-design",
-      "icon": "public/banner.png",
-      "gatekeeperAssess": false,
-      "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
-      ]
-    },
-    "win": {
-      "icon": "public/banner.png",
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
-      ]
-    }
+    "preview": "vite preview"
   },
   "dependencies": {
     "@ffmpeg/ffmpeg": "0.12.15",
@@ -56,8 +14,6 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.18",
-    "electron": "^33.4.11",
-    "electron-builder": "^25.1.8",
     "tailwindcss": "^4.1.18",
     "vite": "^5.4.0"
   }

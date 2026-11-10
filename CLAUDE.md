@@ -11,8 +11,8 @@ Due parti:
 1. **Pipeline di produzione (Python, in `pipeline/` + cartelle `video-N/` nei file di progetto)**:
    è quella che produce davvero i video. L'AI disegna, il codice anima, ogni video passa i QC Q1-Q3.
 2. **Studio web (Vite, in `src/` + `netlify/`)**: fork di Open-Higgsfield-AI con Director Mode
-   (idea → package → keyframe → clip → montaggio nel browser). Dipende da crediti kie.ai/fal.ai,
-   oggi quasi esauriti: è in manutenzione, non si sviluppa senza una richiesta di TAT.
+   (idea → package → keyframe → clip → montaggio nel browser). **Solo archivio** (decisione di TAT
+   del 10/11): non si usa per produrre e non si sviluppa; si tocca solo per tenerlo compilabile.
 
 ## Mappa
 
@@ -22,17 +22,16 @@ Due parti:
 | `src/components/` | una scheda = un file (`*Studio.js`, `LibraryPage.js`) + modali |
 | `src/lib/kie.js`, `api.js` | client kie.ai e backend Netlify; `models.js` catalogo modelli (modificato a mano) |
 | `src/lib/director.js`, `voice.js`, `assemble.js`, `mediaStore.js` | Director Mode: package, voce Gemini/Edge, montaggio ffmpeg.wasm, IndexedDB |
-| `netlify/functions/` | API `/api/*` (login PIN, crediti, libreria Airtable, create/status kie+fal, director). File con `_` = moduli condivisi |
+| `netlify/functions/` | API `/api/*` (login PIN, crediti, libreria Airtable, create/status kie+fal, director). File con `_` = moduli condivisi. `avatar-train`, `avatar-video`, `avatars`, `composio-diagnose`, `fal-credits`, `provider-setup` non sono chiamate dall'app: uso esterno sconosciuto, non toccarle né contarle come morte |
 | `netlify/edge-functions/media-download.js` | unica edge function attiva (`/download-media`) |
 | `data/` | `director-system.md` (prompt del Director), `models.json`, `voices.json` letti dalle functions |
 | `pipeline/kit/` | strumenti Python generici della produzione (vedi `pipeline/README.md`) |
-| `electron/` | app desktop dell'upstream: parcheggiata, non funziona con il backend `/api` relativo |
 | `/mnt/project-files/` (fuori dal repo) | `standard-produzione.md`, `api-gratuite/gerarchia-api.md`, `asset/<serie>/`, `video-N/`, `coordinamento/` |
 
 ## Comandi
 
 ```bash
-ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install --ignore-scripts   # dipendenze (senza scaricare Electron)
+npm install        # dipendenze
 npm run dev        # Vite su :5173; /api e /.netlify/functions vanno al sito Netlify via proxy
 npm run build      # build di produzione in dist/ (stessa che fa Netlify)
 for f in netlify/functions/*.js; do node --check "$f"; done   # controllo sintassi delle functions
